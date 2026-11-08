@@ -1,0 +1,32 @@
+name: Build Windows app (private)
+
+on:
+  push:
+    paths:
+      - "app/**"
+      - ".github/workflows/build-windows.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build tools
+        run: pip install pyinstaller pillow
+      - name: Make icon
+        run: python -c "from PIL import Image; Image.open('icon-512.png').save('app/icon.ico', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+      - name: Build RidingWeather.exe
+        run: pyinstaller --onefile --windowed --name RidingWeather --icon app/icon.ico app/riding_weather.pyw
+      - name: Save the exe (download from this run's page while signed in)
+        uses: actions/upload-artifact@v4
+        with:
+          name: RidingWeather
+          path: dist/RidingWeather.exe
+          retention-days: 90
