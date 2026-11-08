@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Riding Weather</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Riding Wx">
+<meta name="theme-color" content="#1f4e99">
+<style>
+  body{font-family:"Segoe UI",system-ui,sans-serif;margin:0;background:#f4f5f7;color:#222}
+  .wrap{max-width:820px;margin:0 auto;padding:18px;padding-top:max(18px,env(safe-area-inset-top))}
+  header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+  h1{font-size:22px;margin:0}
+  .meta{font-size:13px;color:#888}
+  .meta.stale{color:#c0392b}
+  button{font:inherit;font-size:13px;padding:5px 12px;border:1px solid #ccc;border-radius:6px;background:#fff;cursor:pointer;margin-left:auto}
+  button:hover{background:#eef}
+  table{border-collapse:separate;border-spacing:4px;width:100%;table-layout:fixed;margin-top:12px}
+  th{font-size:14px;font-weight:600;color:#444;padding:4px 0}
+  th.day{text-align:left;width:90px}
+  @media (max-width:560px){.wrap{padding:10px}h1{font-size:19px}th{font-size:12px}th.day{width:44px}td{font-size:17px;padding:6px 0}td small{font-size:9px}table{border-spacing:2px}}
+  td{text-align:center;border-radius:8px;padding:8px 2px;font-size:22px;cursor:pointer;border:2px solid transparent}
+  td:hover{border-color:#555}
+  td.sel{border-color:#222}
+  td small{display:block;font-size:11px;color:#333;margin-top:3px;line-height:1.25}
+  #detail{margin-top:14px;padding:14px;border-radius:10px;background:#fff;font-size:14px;white-space:pre-wrap;min-height:40px;border:1px solid #e3e3e3}
+  .hint{font-size:12px;color:#888;margin-top:8px}
+  .err{color:#c0392b;margin-top:12px}
+  a{color:#1f4e99}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Riding weather</h1>
+    <span class="meta" id="meta">Loading NOAA forecasts…</span>
+    <button id="refresh">Refresh</button>
+  </header>
+  <div id="table"></div>
+  <div class="hint">Big number = daytime high °F; (n) = tonight's low when today's high has passed. Small text: low · rain chance · wind mph (g = gusts). Click a cell for the full NWS forecast.</div>
+  <div id="detail">Click a cell to see the full forecast.</div>
+  <p class="hint" id="links"></p>
+</div>
+<script>
+// ---------- Settings: edit names or coordinates here ----------
+const AREAS = [
+  { name: "Wildcat",  lat: 33.7774, lon: -111.6743 },
+  { name: "Boulders", lat: 33.8691, lon: -112.4533 },
+  { name: "7mi",      lat: 34.5220, lon: -112.3968 },
+  { name: "Alto",     lat: 34.5887, lon: -112.5609 },
+  { name: "Kelly",    lat: 34.9528, lon: -111.6357 },
+];
+const DAYS = 7;
+const REFRESH_MINUTES = 60;
+const COLD = [0x5A,0x8A,0xC6], MID = [0xFC,0xFC,0xFF], HOT = [0xF8,0x69,0x6B];
+// ---------------------------------------------------------------
+
+const store = {
+  get(k, fb) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch (e) { return fb; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
+};
+
+async function getJSON(url) {
+  const r = await fetch(url, { headers: { Accept: "application/geo+json" } });
+  if (!r.ok) throw new Error(`NWS returned ${r.status} for ${url}`);
+  return r.json();
+}
+
+async function forecastUrl(area, grid) {
+  const key = `${area.lat},${area.lon}`;
+  if (grid[key]) return grid[key];
+  const p = await getJSON(`https://api.weather.gov/points/${area.lat},${area.lon}`);
+  if (!p.properties || !p.properties.forecast) throw new Error(`No NWS forecast for ${area.name}`);
+  grid[key] = p.properties.forecast;
+  return grid[key];
+}
+
+function maxNumber(s) { const n = String(s || "").match(/\d+/g); return n ? Math.max(...n.map(Number)) : null; }
+
+function summarize(periods) {
+  const days = {};
+  for (const p of periods) {
+    const date = p.startTime.slice(0, 10);
+    const d = days[date] || (days[date] = { high: null, low: null, pop: 0, wind: null, gust: null, dayText: "", nightText: "" });
+    const pop = p.probabilityOfPrecipitation && p.probabilityOfPrecipitation.value;
+    if (pop != null) d.pop = Math.max(d.pop, pop);
+    if (p.isDaytime) {
+      d.high = p.temperature;
+      d.wind = maxNumber(p.windSpeed);
+      const g = /gusts? as high as (\d+)/i.exec(p.detailedForecast || "");
+      d.gust = g ? Number(g[1]) : null;
+      d.dayText = `${p.name}: ${p.detailedForecast}`;
+    } else {
+      d.low = p.temperature;
+      d.nightText = `${p.name}: ${p.detailedForecast}`;
+    }
+  }
+  return days;
+}
+
+async function loadAll() {
+  const grid = store.get("rw-grid", {});
+  const areas = await Promise.all(AREAS.map(async a => {
+    let f;
+    try { f = await getJSON(await forecastUrl(a, grid)); }
+    catch (e) { delete grid[`${a.lat},${a.lon}`]; f = await getJSON(await forecastUrl(a, grid)); }
+    return { name: a.name, days: summarize(f.properties.periods) };
+  }));
+  store.set("rw-grid", grid);
+  const data = { fetched: new Date().toISOString(), areas };
+  store.set("rw-last", data);
+  return data;
+}
+
+function dateList() {
+  const out = [], now = new Date();
+  for (let i = 0; i < DAYS; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i);
+    out.push({
+      iso: `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`,
+      short: i === 0 ? "Today" : d.toLocaleDateString("en-US", window.innerWidth < 560 ? { weekday: "short" } : { weekday: "short", month: "numeric", day: "numeric" }),
+      long: d.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" }),
+    });
+  }
+  return out;
+}
+
+const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+const hex = rgb => "#" + rgb.map(v => v.toString(16).padStart(2, "0")).join("");
+function scale(values) {
+  const v = values.filter(x => x != null).sort((a, b) => a - b);
+  if (!v.length) return () => "#eeeeee";
+  const min = v[0], max = v[v.length-1], mid = v[Math.floor(v.length/2)];
+  return x => x == null ? "#eeeeee"
+    : x <= mid ? hex(mix(COLD, MID, mid === min ? 1 : (x-min)/(mid-min)))
+    : hex(mix(MID, HOT, max === mid ? 0 : (x-mid)/(max-mid)));
+}
+
+function ago(iso) {
+  const m = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  return m < 1 ? "just now" : m < 60 ? `${m} min ago` : `${Math.round(m/60)} h ago`;
+}
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+
+function render(data, stale) {
+  const dates = dateList();
+  const rows = dates.map(dt => ({ dt, cells: data.areas.map(a => a.days[dt.iso] || null) }));
+  const color = scale(rows.flatMap(r => r.cells.map(c => c && c.high)));
+  let html = `<table><tr><th class="day"></th>${data.areas.map(a => `<th>${esc(a.name)}</th>`).join("")}</tr>`;
+  rows.forEach((r, ri) => {
+    html += `<tr><th class="day">${esc(r.dt.short)}</th>`;
+    r.cells.forEach((c, ci) => {
+      if (!c) { html += `<td style="background:#eee">–</td>`; return; }
+      const big = c.high != null ? c.high : c.low != null ? `(${c.low})` : "–";
+      const narrow = window.innerWidth < 560;
+      const sub = [c.low != null && c.high != null ? (narrow ? `↓${c.low}` : `lo ${c.low}`) : "", c.pop >= 10 ? `${c.pop}%` : "",
+                   c.wind != null ? `${c.wind}${c.gust ? "g" + c.gust : ""}${narrow ? "" : " mph"}` : ""].filter(Boolean).join(narrow ? " " : " · ");
+      html += `<td style="background:${color(c.high)}" data-r="${ri}" data-c="${ci}"><b>${big}</b><small>${esc(sub)}</small></td>`;
+    });
+    html += `</tr>`;
+  });
+  document.getElementById("table").innerHTML = html + `</table>`;
+  const meta = document.getElementById("meta");
+  meta.textContent = `Daily highs °F · NOAA/NWS · updated ${ago(data.fetched)}` + (stale ? " (offline, showing last data)" : "");
+  meta.className = "meta" + (stale ? " stale" : "");
+  document.querySelectorAll("td[data-r]").forEach(td => td.addEventListener("click", () => {
+    document.querySelectorAll("td.sel").forEach(x => x.classList.remove("sel"));
+    td.classList.add("sel");
+    const c = rows[td.dataset.r].cells[td.dataset.c];
+    document.getElementById("detail").textContent =
+      `${data.areas[td.dataset.c].name} · ${rows[td.dataset.r].dt.long}\n\n` + [c.dayText, c.nightText].filter(Boolean).join("\n\n");
+  }));
+}
+
+document.getElementById("links").innerHTML = AREAS.map(a =>
+  `<a href="https://forecast.weather.gov/MapClick.php?lat=${a.lat}&lon=${a.lon}" target="_blank" rel="noopener">${esc(a.name)} on weather.gov</a>`).join(" · ");
+
+let lastData = null;
+async function refresh() {
+  document.getElementById("meta").textContent = "Loading NOAA forecasts…";
+  try { lastData = await loadAll(); render(lastData, false); }
+  catch (e) {
+    lastData = store.get("rw-last", null);
+    if (lastData) render(lastData, true);
+    else document.getElementById("table").innerHTML = `<div class="err">Could not reach the National Weather Service: ${esc(e.message)}. Check the internet connection and click Refresh.</div>`;
+  }
+}
+document.getElementById("refresh").addEventListener("click", refresh);
+setInterval(refresh, REFRESH_MINUTES * 60000);
+setInterval(() => { if (lastData) document.getElementById("meta").textContent = document.getElementById("meta").textContent.replace(/updated .*? ago|updated just now/, `updated ${ago(lastData.fetched)}`); }, 60000);
+refresh();
+</script>
+</body>
+</html>
